@@ -23,8 +23,8 @@ case "${1:-}" in
     python3 generateload.py --url "$BASE_URL" \
       --workers 2 \
       --duration 120 \
-      --scenarios light \
-      --sleep 2.0 \
+      --scenarios minimal \
+      --sleep 3.0 \
       -q
     ;;
   light)

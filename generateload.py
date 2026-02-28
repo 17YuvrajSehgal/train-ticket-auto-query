@@ -42,7 +42,7 @@ FULL_SCENARIOS = [
 ]
 FULL_SCENARIO_WEIGHTS = [3.0, 3.0, 2.0, 2.0, 1.0, 1.0, 1.0]
 
-# ---- Light scenarios: single-endpoint or two-call read-only (hit different services) ----
+# ---- Light scenarios: read-only, hits many services ----
 def light_query_route(q: Query) -> None:
     q.query_route(routeId="")
 
@@ -89,21 +89,34 @@ LIGHT_SCENARIOS = [
     light_query_assurances,
     light_query_food,
 ]
-# Uniform weight for light scenarios so we hit all endpoints
 LIGHT_SCENARIO_WEIGHTS = [1.0] * len(LIGHT_SCENARIOS)
 
-# Mixed mode: 40% full scenarios, 60% light (more endpoint variety at high RPS)
-MIXED_FULL_WEIGHT = 0.4
+# ---- Minimal scenarios: only fastest read-only endpoints, no food/auth/DB-heavy calls ----
+# Goal: clean normal baseline with Apdex >0.9 and P99 <300ms
+MINIMAL_SCENARIOS = [
+    light_query_route,        # ts-route-service       — simple DB lookup
+    light_query_trips_left,   # ts-travel-service      — trip search high speed
+    light_query_trips_normal, # ts-travel2-service     — trip search normal
+    light_query_cheapest,     # ts-travel-plan-service — cheapest route
+    light_query_quickest,     # ts-travel-plan-service — quickest route
+    light_query_min_station,  # ts-travel-plan-service — min stops
+    light_query_admin_config, # ts-config-service      — config read
+]
+MINIMAL_SCENARIO_WEIGHTS = [1.0] * len(MINIMAL_SCENARIOS)
+
+# Mixed mode: 40% full scenarios, 60% light
+MIXED_FULL_WEIGHT  = 0.4
 MIXED_LIGHT_WEIGHT = 0.6
 
 
 def choose_full_scenario():
     return random.choices(FULL_SCENARIOS, weights=FULL_SCENARIO_WEIGHTS, k=1)[0]
 
-
 def choose_light_scenario():
     return random.choices(LIGHT_SCENARIOS, weights=LIGHT_SCENARIO_WEIGHTS, k=1)[0]
 
+def choose_minimal_scenario():
+    return random.choices(MINIMAL_SCENARIOS, weights=MINIMAL_SCENARIO_WEIGHTS, k=1)[0]
 
 def choose_mixed_scenario():
     if random.random() < MIXED_FULL_WEIGHT:
@@ -129,7 +142,7 @@ def _run_worker(
         if q.login():
             break
         if attempt < 2:
-            time.sleep(1.0 * (attempt + 1))  # 1s, then 2s backoff
+            time.sleep(1.0 * (attempt + 1))
     else:
         logger.error("Worker %d: login failed after retries.", worker_id)
         return 0
@@ -173,6 +186,9 @@ def run_workload(
     elif scenario_mode == "light":
         scenario_chooser = choose_light_scenario
         scenarios_desc = "light (route, trips, travelplan, admin, assurances, food)"
+    elif scenario_mode == "minimal":
+        scenario_chooser = choose_minimal_scenario
+        scenarios_desc = "minimal (route, trips, travelplan, config — no food/auth/DB-heavy)"
     else:
         scenario_chooser = choose_mixed_scenario
         scenarios_desc = "mixed (full + light endpoints)"
@@ -218,7 +234,7 @@ def run_workload(
     total = counters["total"]
     rps = total / elapsed if elapsed > 0 else 0
     logger.info(
-        "Workload finished: %d scenarios in %.2fs => %.1f scenarios/s (target ~1000: increase --workers)",
+        "Workload finished: %d scenarios in %.2fs => %.1f scenarios/s",
         total, elapsed, rps,
     )
 
@@ -229,58 +245,42 @@ def parse_args(argv=None):
                     "Use --workers and --duration for high load (~1000 req/s).",
     )
     parser.add_argument(
-        "--url",
-        dest="url",
-        default=DEFAULT_BASE_URL,
+        "--url", dest="url", default=DEFAULT_BASE_URL,
         help=f"Base URL for Train Ticket gateway (default: {DEFAULT_BASE_URL})",
     )
     parser.add_argument(
-        "--iterations",
-        "-n",
-        dest="iterations",
-        type=int,
-        default=DEFAULT_ITERATIONS,
+        "--iterations", "-n", dest="iterations", type=int, default=DEFAULT_ITERATIONS,
         help=f"Total iterations across all workers (default: {DEFAULT_ITERATIONS}). Ignored if --duration is set.",
     )
     parser.add_argument(
-        "--sleep",
-        dest="sleep",
-        type=float,
-        default=None,
+        "--sleep", dest="sleep", type=float, default=None,
         help="Sleep between iterations in seconds (default: 0.2 for single worker, 0 with --workers or --duration)",
     )
     parser.add_argument(
-        "--workers",
-        "-w",
-        dest="workers",
-        type=int,
-        default=1,
-        help="Number of concurrent workers (default: 1). Increase for ~1000 req/s (e.g. 100–200).",
+        "--workers", "-w", dest="workers", type=int, default=1,
+        help="Number of concurrent workers (default: 1).",
     )
     parser.add_argument(
-        "--duration",
-        "-d",
-        dest="duration",
-        type=float,
-        default=None,
+        "--duration", "-d", dest="duration", type=float, default=None,
         help="Run for this many seconds instead of fixed iterations (e.g. -d 60).",
     )
     parser.add_argument(
-        "--scenarios",
-        dest="scenarios",
-        choices=("full", "light", "mixed"),
+        "--scenarios", dest="scenarios",
+        choices=("full", "light", "minimal", "mixed"),   # ← minimal added here
         default="mixed",
-        help="full=multi-step flows only; light=single-endpoint reads; mixed=both (default: mixed for load).",
+        help=(
+            "full=multi-step flows only; "
+            "light=single-endpoint reads incl. food/auth; "
+            "minimal=fastest read-only only, clean baseline; "
+            "mixed=full+light (default: mixed)."
+        ),
     )
     parser.add_argument(
-        "-q", "--quiet",
-        dest="quiet",
-        action="store_true",
+        "-q", "--quiet", dest="quiet", action="store_true",
         help="Less per-iteration logging.",
     )
     args = parser.parse_args(argv)
 
-    # Default sleep: 0 when doing high load (workers>1 or duration set), else 0.2
     if args.sleep is None:
         args.sleep = 0.0 if (args.workers > 1 or args.duration is not None) else DEFAULT_SLEEP_SECONDS
 
