@@ -125,8 +125,13 @@ def _run_worker(
     logger = logging.getLogger("generateload")
     local_count = 0
     q = Query(base_url)
-    if not q.login():
-        logger.error("Worker %d: login failed.", worker_id)
+    for attempt in range(3):
+        if q.login():
+            break
+        if attempt < 2:
+            time.sleep(1.0 * (attempt + 1))  # 1s, then 2s backoff
+    else:
+        logger.error("Worker %d: login failed after retries.", worker_id)
         return 0
 
     while True:

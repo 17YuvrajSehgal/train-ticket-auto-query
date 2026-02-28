@@ -48,18 +48,28 @@ class Query:
         r = self.session.post(url=url, headers=headers,
                               data=data, verify=False)
 
-        if r.status_code == 200:
-            data = r.json().get("data")
-            self.uid = data.get("userId")
-            self.token = data.get("token")
-            self.session.headers.update(
-                {"Authorization": f"Bearer {self.token}"}
-            )
-            logger.info(f"login success, uid: {self.uid}")
-            return True
-        else:
-            logger.error("login failed")
+        if r.status_code != 200:
+            logger.error("login failed, status=%s body=%s", r.status_code, r.text[:200] if r.text else "")
             return False
+        try:
+            payload = r.json()
+        except Exception as e:
+            logger.error("login failed, invalid json: %s", e)
+            return False
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not data or not isinstance(data, dict):
+            logger.error("login failed, no data in response: %s", payload)
+            return False
+        self.uid = data.get("userId")
+        self.token = data.get("token")
+        if not self.uid or not self.token:
+            logger.error("login failed, missing userId or token in data: %s", data)
+            return False
+        self.session.headers.update(
+            {"Authorization": f"Bearer {self.token}"}
+        )
+        logger.info(f"login success, uid: {self.uid}")
+        return True
 
     def admin_login(self):
         return self.login
