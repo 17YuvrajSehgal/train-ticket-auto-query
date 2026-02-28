@@ -94,14 +94,12 @@ LIGHT_SCENARIO_WEIGHTS = [1.0] * len(LIGHT_SCENARIOS)
 # ---- Minimal scenarios: only fastest read-only endpoints, no food/auth/DB-heavy calls ----
 # Goal: clean normal baseline with Apdex >0.9 and P99 <300ms
 MINIMAL_SCENARIOS = [
-    light_query_route,        # ts-route-service       — simple DB lookup
-    light_query_trips_left,   # ts-travel-service      — trip search high speed
-    light_query_trips_normal, # ts-travel2-service     — trip search normal
-    light_query_cheapest,     # ts-travel-plan-service — cheapest route
-    light_query_quickest,     # ts-travel-plan-service — quickest route
-    light_query_min_station,  # ts-travel-plan-service — min stops
-    light_query_admin_config, # ts-config-service      — config read
+    light_query_route,        # ✅ ts-route-service        — works fine
+    light_query_trips_left,   # ✅ ts-travel-service       — high speed trips
+    light_query_trips_normal, # ✅ ts-travel2-service      — normal trips (when data exists)
 ]
+MINIMAL_SCENARIO_WEIGHTS = [1.0] * len(MINIMAL_SCENARIOS)
+
 MINIMAL_SCENARIO_WEIGHTS = [1.0] * len(MINIMAL_SCENARIOS)
 
 # Mixed mode: 40% full scenarios, 60% light
