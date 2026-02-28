@@ -3,11 +3,10 @@ import requests
 import logging
 import time
 import random
-from .utils import *
+from utils import *
 
 logger = logging.getLogger("auto-queries")
-datestr = time.strftime("%Y-%m-%d", time.localtime())
-
+datestr = "2021-07-14"
 
 class Query:
     """
@@ -92,18 +91,35 @@ class Query:
 
         response = self.session.post(url=url, headers=headers, json=payload)
 
-        if response.status_code != 200 or response.json().get("data") is None:
-            logger.warning(
-                f"request for {url} failed. response data is {response.text}")
-            return None
+        # Robust JSON parsing (dict or list)
+        try:
+            payload_json = response.json()
+        except Exception:
+            logger.warning(f"request for {url} failed. non-json response: {response.text}")
+            return []
 
-        data = response.json().get("data")  # type: dict
+        if response.status_code != 200:
+            logger.warning(f"request for {url} failed. status={response.status_code}, body={response.text}")
+            return []
+
+        # Some services return {"data": [...]}, others return [...] directly
+        if isinstance(payload_json, dict):
+            data = payload_json.get("data")
+        elif isinstance(payload_json, list):
+            data = payload_json
+        else:
+            data = None
+
+        if not data:
+            logger.warning(f"request for {url} failed. unexpected json: {payload_json}")
+            return []
 
         trip_ids = []
         for d in data:
-            trip_id = d.get("tripId").get("type") + \
-                d.get("tripId").get("number")
-            trip_ids.append(trip_id)
+            # d might be dict like {"tripId": {"type": "...", "number": "..."}}
+            trip = d.get("tripId") if isinstance(d, dict) else None
+            if isinstance(trip, dict) and trip.get("type") and trip.get("number"):
+                trip_ids.append(trip["type"] + trip["number"])
         return trip_ids
 
     def query_normal_ticket(self, place_pair: tuple = (), time: str = "", headers: dict = {}) -> List[str]:
@@ -125,18 +141,37 @@ class Query:
 
         response = self.session.post(url=url, headers=headers, json=payload)
 
-        if response.status_code != 200 or response.json().get("data") is None:
-            logger.warning(
-                f"request for {url} failed. response data is {response.text}")
-            return None
+        # Robust JSON parsing (dict or list)
+        try:
+            payload_json = response.json()
+        except Exception:
+            logger.warning(f"request for {url} failed. non-json response: {response.text}")
+            return []
 
-        data = response.json().get("data")  # type: dict
+        if response.status_code != 200:
+            logger.warning(f"request for {url} failed. status={response.status_code}, body={response.text}")
+            return []
 
-        trip_ids = []
+        # Some services return {"data": [...]}, others return [...] directly
+        if isinstance(payload_json, dict):
+            data = payload_json.get("data")
+        elif isinstance(payload_json, list):
+            data = payload_json
+        else:
+            data = None
+
+        if not data:
+            logger.warning(f"request for {url} failed. unexpected json: {payload_json}")
+            return []
+
+        trip_ids: List[str] = []
         for d in data:
-            trip_id = d.get("tripId").get("type") + \
-                d.get("tripId").get("number")
-            trip_ids.append(trip_id)
+            if not isinstance(d, dict):
+                continue
+            trip = d.get("tripId")
+            if isinstance(trip, dict) and trip.get("type") and trip.get("number"):
+                trip_ids.append(trip["type"] + trip["number"])
+
         return trip_ids
 
     def query_high_speed_ticket_parallel(self, place_pair: tuple = (), time: str = "", headers: dict = {}) -> List[str]:
@@ -166,18 +201,37 @@ class Query:
 
         response = self.session.post(url=url, headers=headers, json=payload)
 
-        if response.status_code != 200 or response.json().get("data") is None:
-            logger.warning(
-                f"request for {url} failed. response data is {response.text}")
-            return None
+        # Robust JSON parsing (dict or list)
+        try:
+            payload_json = response.json()
+        except Exception:
+            logger.warning(f"request for {url} failed. non-json response: {response.text}")
+            return []
 
-        data = response.json().get("data")  # type: dict
+        if response.status_code != 200:
+            logger.warning(f"request for {url} failed. status={response.status_code}, body={response.text}")
+            return []
 
-        trip_ids = []
+        # Some services return {"data": [...]}, others return [...] directly
+        if isinstance(payload_json, dict):
+            data = payload_json.get("data")
+        elif isinstance(payload_json, list):
+            data = payload_json
+        else:
+            data = None
+
+        if not data:
+            logger.warning(f"request for {url} failed. unexpected json: {payload_json}")
+            return []
+
+        trip_ids: List[str] = []
         for d in data:
-            trip_id = d.get("tripId").get("type") + \
-                d.get("tripId").get("number")
-            trip_ids.append(trip_id)
+            if not isinstance(d, dict):
+                continue
+            trip = d.get("tripId")
+            if isinstance(trip, dict) and trip.get("type") and trip.get("number"):
+                trip_ids.append(trip["type"] + trip["number"])
+
         return trip_ids
 
     def query_advanced_ticket(self, place_pair: tuple = (), type: str = "cheapest", date: str = "", headers: dict = {}) -> List[str]:

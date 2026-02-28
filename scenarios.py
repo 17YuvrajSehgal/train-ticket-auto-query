@@ -1,5 +1,5 @@
-from .queries import Query
-from .utils import *
+from queries import Query
+from utils import *
 import logging
 
 logger = logging.getLogger("autoquery-scenario")
@@ -72,15 +72,17 @@ def query_and_preserve(q: Query):
     if high_speed:
         start = "Shang Hai"
         end = "Su Zhou"
-        high_speed_place_pair = (start, end)
-        trip_ids = q.query_high_speed_ticket(place_pair=high_speed_place_pair)
+        trip_ids = q.query_high_speed_ticket(place_pair=(start, end))
     else:
         start = "Shang Hai"
         end = "Nan Jing"
-        other_place_pair = (start, end)
-        trip_ids = q.query_normal_ticket(place_pair=other_place_pair)
+        trip_ids = q.query_normal_ticket(place_pair=(start, end))
 
     _ = q.query_assurances()
+
+    if not trip_ids:
+        logger.warning("No trips returned (trip_ids empty). Skipping preserve.")
+        return
 
     q.preserve(start, end, trip_ids, high_speed)
 
