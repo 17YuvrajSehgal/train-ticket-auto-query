@@ -21,10 +21,10 @@ case "${1:-}" in
     # Target: ~5-10 req/s, read-only endpoints only, 0.5s sleep between iterations
     # Goal: healthy Apdex >0.9, P99 <300ms, no DB stress
     python3 generateload.py --url "$BASE_URL" \
-      --workers 3 \
+      --workers 2 \
       --duration 120 \
       --scenarios minimal \
-      --sleep 2.0 \
+      --sleep 3.0 \
       -q
     ;;
   light)
