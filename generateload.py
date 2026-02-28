@@ -25,12 +25,15 @@ from scenarios import (
 DEFAULT_BASE_URL = "http://localhost:30467"
 
 # Default iterations (used when --duration is not set)
-DEFAULT_ITERATIONS = 50
+DEFAULT_ITERATIONS = 5
 
-# Small sleep between iterations (single-worker); with workers>1 or --duration, default 0
-DEFAULT_SLEEP_SECONDS = 0.2
+# Default sleep between iterations for single-worker runs.
+# Increased from 0.2s to 2.0s to reduce pressure on the resource-constrained VM.
+DEFAULT_SLEEP_SECONDS = 2.0
 
 # ---- Full scenarios (multi-step flows) ----
+# WARNING: These are DB-heavy and involve order creation, payment, etc.
+# Do NOT use on a memory-constrained VM (<64GB RAM) without JVM heap caps.
 FULL_SCENARIOS = [
     query_and_preserve,
     query_and_pay,
@@ -94,13 +97,18 @@ LIGHT_SCENARIO_WEIGHTS = [1.0] * len(LIGHT_SCENARIOS)
 # ---- Minimal scenarios: only fastest read-only endpoints, no food/auth/DB-heavy calls ----
 # Goal: clean normal baseline with Apdex >0.9 and P99 <300ms
 MINIMAL_SCENARIOS = [
-    light_query_route,        # ✅ ts-route-service        — works fine
-    light_query_trips_left,   # ✅ ts-travel-service       — high speed trips
-    light_query_trips_normal, # ✅ ts-travel2-service      — normal trips (when data exists)
+    light_query_route,        # ts-route-service        — very cheap, no DB
+    light_query_trips_left,   # ts-travel-service       — high speed trips
+    light_query_trips_normal, # ts-travel2-service      — normal trips
 ]
 MINIMAL_SCENARIO_WEIGHTS = [1.0] * len(MINIMAL_SCENARIOS)
 
-MINIMAL_SCENARIO_WEIGHTS = [1.0] * len(MINIMAL_SCENARIOS)
+# ---- Sanity scenario: single cheapest read, just to confirm the system is alive ----
+# Hits only ts-route-service. Use this after restart to warm up gently.
+SANITY_SCENARIOS = [
+    light_query_route,
+]
+SANITY_SCENARIO_WEIGHTS = [1.0]
 
 # Mixed mode: 40% full scenarios, 60% light
 MIXED_FULL_WEIGHT  = 0.4
@@ -115,6 +123,9 @@ def choose_light_scenario():
 
 def choose_minimal_scenario():
     return random.choices(MINIMAL_SCENARIOS, weights=MINIMAL_SCENARIO_WEIGHTS, k=1)[0]
+
+def choose_sanity_scenario():
+    return random.choices(SANITY_SCENARIOS, weights=SANITY_SCENARIO_WEIGHTS, k=1)[0]
 
 def choose_mixed_scenario():
     if random.random() < MIXED_FULL_WEIGHT:
@@ -131,19 +142,22 @@ def _run_worker(
     scenario_chooser,
     counters: dict,
     log_level: int,
+    needs_login: bool,
 ) -> int:
     """Run a single worker loop. Returns number of completed scenarios."""
     logger = logging.getLogger("generateload")
     local_count = 0
     q = Query(base_url)
-    for attempt in range(3):
-        if q.login():
-            break
-        if attempt < 2:
-            time.sleep(1.0 * (attempt + 1))
-    else:
-        logger.error("Worker %d: login failed after retries.", worker_id)
-        return 0
+
+    if needs_login:
+        for attempt in range(3):
+            if q.login():
+                break
+            if attempt < 2:
+                time.sleep(1.0 * (attempt + 1))
+        else:
+            logger.error("Worker %d: login failed after retries.", worker_id)
+            return 0
 
     while True:
         if end_time is not None and time.monotonic() >= end_time:
@@ -168,28 +182,37 @@ def _run_worker(
     return local_count
 
 
+# Scenario modes that do NOT require a login (pure read-only, no auth token needed)
+_NO_LOGIN_MODES = {"sanity", "minimal"}
+
+
 def run_workload(
     base_url: str,
     iterations: int | None,
     sleep_seconds: float,
     workers: int = 1,
     duration_seconds: float | None = None,
-    scenario_mode: str = "full",
+    scenario_mode: str = "minimal",
 ) -> None:
     logger = logging.getLogger("generateload")
 
     if scenario_mode == "full":
         scenario_chooser = choose_full_scenario
-        scenarios_desc = "full (preserve/pay/collect/execute/cancel/consign/rebook)"
+        scenarios_desc = "full (preserve/pay/collect/execute/cancel/consign/rebook) [DB-HEAVY]"
     elif scenario_mode == "light":
         scenario_chooser = choose_light_scenario
         scenarios_desc = "light (route, trips, travelplan, admin, assurances, food)"
     elif scenario_mode == "minimal":
         scenario_chooser = choose_minimal_scenario
-        scenarios_desc = "minimal (route, trips, travelplan, config — no food/auth/DB-heavy)"
+        scenarios_desc = "minimal (route, trips — no food/auth/DB-heavy)"
+    elif scenario_mode == "sanity":
+        scenario_chooser = choose_sanity_scenario
+        scenarios_desc = "sanity (route-service only — single cheapest read)"
     else:
         scenario_chooser = choose_mixed_scenario
-        scenarios_desc = "mixed (full + light endpoints)"
+        scenarios_desc = "mixed (full + light endpoints) [DB-HEAVY]"
+
+    needs_login = scenario_mode not in _NO_LOGIN_MODES
 
     if duration_seconds is not None:
         end_time = time.monotonic() + duration_seconds
@@ -214,6 +237,7 @@ def run_workload(
         _run_worker(
             0, base_url, end_time, iterations_per_worker,
             sleep_seconds, scenario_chooser, counters, logging.INFO,
+            needs_login,
         )
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -222,6 +246,7 @@ def run_workload(
                     _run_worker,
                     i, base_url, end_time, iterations_per_worker,
                     sleep_seconds, scenario_chooser, counters, logging.INFO,
+                    needs_login,
                 )
                 for i in range(workers)
             ]
@@ -239,8 +264,12 @@ def run_workload(
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Train Ticket auto-query workload generator. "
-                    "Use --workers and --duration for high load (~1000 req/s).",
+        description=(
+            "Train Ticket auto-query workload generator.\n"
+            "Default mode is 'minimal' (read-only, no DB writes).\n"
+            "Use --scenarios full or mixed only on well-resourced VMs (>=64GB RAM).\n"
+            "Use --workers and --duration for sustained load testing."
+        ),
     )
     parser.add_argument(
         "--url", dest="url", default=DEFAULT_BASE_URL,
@@ -252,11 +281,15 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--sleep", dest="sleep", type=float, default=None,
-        help="Sleep between iterations in seconds (default: 0.2 for single worker, 0 with --workers or --duration)",
+        help=(
+            "Sleep between iterations in seconds "
+            "(default: 2.0s for single-worker; 1.0s with --workers; 0 with --duration). "
+            "Increase this on memory-constrained VMs to reduce GC pressure."
+        ),
     )
     parser.add_argument(
         "--workers", "-w", dest="workers", type=int, default=1,
-        help="Number of concurrent workers (default: 1).",
+        help="Number of concurrent workers (default: 1). Keep <=2 on 40GB VMs.",
     )
     parser.add_argument(
         "--duration", "-d", dest="duration", type=float, default=None,
@@ -264,13 +297,15 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--scenarios", dest="scenarios",
-        choices=("full", "light", "minimal", "mixed"),   # ← minimal added here
-        default="mixed",
+        choices=("full", "light", "minimal", "mixed", "sanity"),
+        default="minimal",
         help=(
-            "full=multi-step flows only; "
+            "sanity=route-service only, safest; "
+            "minimal=route+trips read-only (DEFAULT); "
             "light=single-endpoint reads incl. food/auth; "
-            "minimal=fastest read-only only, clean baseline; "
-            "mixed=full+light (default: mixed)."
+            "full=multi-step DB-heavy flows; "
+            "mixed=full+light (DB-heavy). "
+            "WARNING: full/mixed cause heavy DB and order-service pressure."
         ),
     )
     parser.add_argument(
@@ -280,7 +315,12 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
 
     if args.sleep is None:
-        args.sleep = 0.0 if (args.workers > 1 or args.duration is not None) else DEFAULT_SLEEP_SECONDS
+        if args.duration is not None:
+            args.sleep = 0.0
+        elif args.workers > 1:
+            args.sleep = 1.0
+        else:
+            args.sleep = DEFAULT_SLEEP_SECONDS
 
     return args
 
