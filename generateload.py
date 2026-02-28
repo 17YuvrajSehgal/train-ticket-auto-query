@@ -28,7 +28,7 @@ DEFAULT_BASE_URL = "http://localhost:30467"
 DEFAULT_ITERATIONS = 5
 
 # Default sleep between iterations for single-worker runs.
-# Increased from 0.2s to 2.0s to reduce pressure on the resource-constrained VM.
+# 2.0s keeps pressure very low on memory-constrained VMs.
 DEFAULT_SLEEP_SECONDS = 2.0
 
 # ---- Full scenarios (multi-step flows) ----
@@ -94,8 +94,10 @@ LIGHT_SCENARIOS = [
 ]
 LIGHT_SCENARIO_WEIGHTS = [1.0] * len(LIGHT_SCENARIOS)
 
-# ---- Minimal scenarios: only fastest read-only endpoints, no food/auth/DB-heavy calls ----
-# Goal: clean normal baseline with Apdex >0.9 and P99 <300ms
+# ---- Minimal scenarios: only fastest read-only endpoints ----
+# All three require a valid Bearer token so the gateway forwards the request.
+# Login is done ONCE per run and the token is injected into each worker's
+# Query session, avoiding repeated hammering of ts-auth-service.
 MINIMAL_SCENARIOS = [
     light_query_route,        # ts-route-service        — very cheap, no DB
     light_query_trips_left,   # ts-travel-service       — high speed trips
@@ -103,8 +105,9 @@ MINIMAL_SCENARIOS = [
 ]
 MINIMAL_SCENARIO_WEIGHTS = [1.0] * len(MINIMAL_SCENARIOS)
 
-# ---- Sanity scenario: single cheapest read, just to confirm the system is alive ----
-# Hits only ts-route-service. Use this after restart to warm up gently.
+# ---- Sanity scenario: single cheapest read, just to confirm system is alive ----
+# query_route does NOT need auth (plain GET with no uid dependency).
+# Safe to run immediately after restart.
 SANITY_SCENARIOS = [
     light_query_route,
 ]
@@ -133,6 +136,23 @@ def choose_mixed_scenario():
     return choose_light_scenario()
 
 
+def _do_login(base_url: str, logger: logging.Logger) -> tuple[str, str] | None:
+    """
+    Perform login once and return (uid, token), or None on failure.
+    This is called a single time per run so all workers share the same token,
+    meaning ts-auth-service is hit exactly once regardless of worker count.
+    """
+    q = Query(base_url)
+    for attempt in range(3):
+        if q.login():
+            return q.uid, q.token
+        wait = 2.0 * (attempt + 1)
+        logger.warning("Login attempt %d failed, retrying in %.0fs...", attempt + 1, wait)
+        time.sleep(wait)
+    logger.error("Login failed after 3 attempts. Check ts-auth-service and ts-verificationcode-service.")
+    return None
+
+
 def _run_worker(
     worker_id: int,
     base_url: str,
@@ -142,14 +162,22 @@ def _run_worker(
     scenario_chooser,
     counters: dict,
     log_level: int,
-    needs_login: bool,
+    shared_uid: str | None,
+    shared_token: str | None,
 ) -> int:
     """Run a single worker loop. Returns number of completed scenarios."""
     logger = logging.getLogger("generateload")
     local_count = 0
     q = Query(base_url)
 
-    if needs_login:
+    if shared_token:
+        # Inject the pre-obtained token — no login call needed from this worker.
+        q.uid = shared_uid
+        q.token = shared_token
+        q.session.headers.update({"Authorization": f"Bearer {shared_token}"})
+    else:
+        # Fallback: each worker logs in independently (full/mixed modes with
+        # per-user state like order queries that need a real uid).
         for attempt in range(3):
             if q.login():
                 break
@@ -182,8 +210,8 @@ def _run_worker(
     return local_count
 
 
-# Scenario modes that do NOT require a login (pure read-only, no auth token needed)
-_NO_LOGIN_MODES = {"sanity", "minimal"}
+# Modes where all workers can share a single login token (read-only, no per-user state)
+_SHARED_LOGIN_MODES = {"sanity", "minimal", "light"}
 
 
 def run_workload(
@@ -204,15 +232,26 @@ def run_workload(
         scenarios_desc = "light (route, trips, travelplan, admin, assurances, food)"
     elif scenario_mode == "minimal":
         scenario_chooser = choose_minimal_scenario
-        scenarios_desc = "minimal (route, trips — no food/auth/DB-heavy)"
+        scenarios_desc = "minimal (route + trips, read-only)"
     elif scenario_mode == "sanity":
         scenario_chooser = choose_sanity_scenario
-        scenarios_desc = "sanity (route-service only — single cheapest read)"
+        scenarios_desc = "sanity (route-service only)"
     else:
         scenario_chooser = choose_mixed_scenario
         scenarios_desc = "mixed (full + light endpoints) [DB-HEAVY]"
 
-    needs_login = scenario_mode not in _NO_LOGIN_MODES
+    # For read-only modes: login ONCE, share the token across all workers.
+    # For full/mixed: each worker logs in independently (needs real per-user uid).
+    shared_uid: str | None = None
+    shared_token: str | None = None
+    if scenario_mode in _SHARED_LOGIN_MODES:
+        logger.info("Performing single shared login for all workers...")
+        result = _do_login(base_url, logger)
+        if result is None:
+            logger.error("Aborting: cannot proceed without a valid auth token.")
+            return
+        shared_uid, shared_token = result
+        logger.info("Shared login OK. Workers will reuse this token (no repeated auth hits).")
 
     if duration_seconds is not None:
         end_time = time.monotonic() + duration_seconds
@@ -237,7 +276,7 @@ def run_workload(
         _run_worker(
             0, base_url, end_time, iterations_per_worker,
             sleep_seconds, scenario_chooser, counters, logging.INFO,
-            needs_login,
+            shared_uid, shared_token,
         )
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -246,7 +285,7 @@ def run_workload(
                     _run_worker,
                     i, base_url, end_time, iterations_per_worker,
                     sleep_seconds, scenario_chooser, counters, logging.INFO,
-                    needs_login,
+                    shared_uid, shared_token,
                 )
                 for i in range(workers)
             ]
@@ -266,7 +305,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=(
             "Train Ticket auto-query workload generator.\n"
-            "Default mode is 'minimal' (read-only, no DB writes).\n"
+            "Default mode is 'minimal' (read-only, single shared login).\n"
             "Use --scenarios full or mixed only on well-resourced VMs (>=64GB RAM).\n"
             "Use --workers and --duration for sustained load testing."
         ),
@@ -284,7 +323,7 @@ def parse_args(argv=None):
         help=(
             "Sleep between iterations in seconds "
             "(default: 2.0s for single-worker; 1.0s with --workers; 0 with --duration). "
-            "Increase this on memory-constrained VMs to reduce GC pressure."
+            "Increase on memory-constrained VMs to reduce GC pressure."
         ),
     )
     parser.add_argument(
@@ -300,11 +339,11 @@ def parse_args(argv=None):
         choices=("full", "light", "minimal", "mixed", "sanity"),
         default="minimal",
         help=(
-            "sanity=route-service only, safest; "
-            "minimal=route+trips read-only (DEFAULT); "
-            "light=single-endpoint reads incl. food/auth; "
-            "full=multi-step DB-heavy flows; "
-            "mixed=full+light (DB-heavy). "
+            "sanity  = route-service GET only, no auth needed; "
+            "minimal = route+trips read-only, 1 shared login (DEFAULT); "
+            "light   = all read endpoints incl. food/admin, 1 shared login; "
+            "full    = multi-step DB-heavy flows, per-worker login; "
+            "mixed   = full+light DB-heavy, per-worker login. "
             "WARNING: full/mixed cause heavy DB and order-service pressure."
         ),
     )
